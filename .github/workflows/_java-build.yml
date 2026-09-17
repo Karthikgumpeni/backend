@@ -1,5 +1,5 @@
 # Reusable — Java Build + SAST + Container Security + ECR Push + Cosign Sign
-#
+##
 # Called by every Java/Spring Boot per-service ci-*.yml workflow.
 # Pipeline stages (all in a single job, sequential):
 #   1. Maven verify  — unit/integration tests + JaCoCo coverage gate (≥ 80%)
