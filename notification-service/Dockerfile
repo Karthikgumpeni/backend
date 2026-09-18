@@ -1,4 +1,4 @@
-#Docker File
+#Docker File node app
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
@@ -12,5 +12,6 @@ COPY package.json .
 USER pharma
 EXPOSE 3000
 CMD ["node", "src/index.js"]
+
 
 
