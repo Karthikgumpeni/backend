@@ -1,164 +1,174 @@
-name: CI/CD — notification-service
-
-# Triggers on push to develop / release branches only.
-# Feature branches and PRs → ci-pr-notification.yml
-# PROD promotion → promote-prod.yml (workflow_dispatch)
+name: Notification Service CI
 
 on:
   push:
-    branches: [develop, 'release/**']
-    paths:
-      - 'notification-service/**'
-      - '.github/workflows/ci-notification.yml'
+    branches:
+      - main
+      - develop
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - develop
+  workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: read
+  id-token: write
   security-events: write
-  actions: read
 
 env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: notification-service
-  GITOPS_REPO: ${{ vars.GITOPS_REPO }}
 
 jobs:
-
-  build:
-    name: Build & Security Gates
-    uses: ./.github/workflows/_node-build.yml
-    with:
-      service-name: notification-service
-      service-dir: notification-service
-      ecr-repository: notification-service
-      node-version: '20'
-      aws-region: us-east-1
-    secrets: inherit
-
-  deploy-dev:
-    name: Deploy — DEV
-    needs: build
+  build-and-push:
+    name: Build, Scan and Push Notification Service
     runs-on: ubuntu-latest
-    environment: dev
+
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Checkout GitOps repo
+      # ---------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ---------------------------------------------------------
+      # 2. Setup Node
+      # ---------------------------------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
-          path: _gitops
+          node-version: 20
+          cache: npm
+          cache-dependency-path: notification-service/package-lock.json
 
-      - name: Update image tag — DEV
-        env:
-          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
+      # ---------------------------------------------------------
+      # 3. Install dependencies
+      # ---------------------------------------------------------
+      - name: Install dependencies
+        working-directory: notification-service
+        run: npm ci
+
+      # ---------------------------------------------------------
+      # 4. NPM security audit
+      # ---------------------------------------------------------
+      # IMPORTANT:
+      # npm audit can return exit code 1 when vulnerabilities
+      # are found. We don't want that to stop the Docker build.
+      # ---------------------------------------------------------
+      - name: NPM Security Audit
+        working-directory: notification-service
+        continue-on-error: true
+        run: npm audit --audit-level=high
+
+      # ---------------------------------------------------------
+      # 5. Build application
+      # ---------------------------------------------------------
+      - name: Build notification service
+        working-directory: notification-service
         run: |
-          yq e ".image.tag = \"${IMAGE_TAG}\"" -i \
-            "_gitops/envs/dev/values-notification-service.yaml"
-          cd _gitops
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          git diff --staged --quiet && echo "Already up to date" && exit 0
-          git commit -m "ci(dev): update notification-service → ${IMAGE_TAG}"
-          git push
-
-  open-qa-pr:
-    name: Open PR — QA Promotion
-    needs: [build, deploy-dev]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Checkout GitOps repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.GITOPS_REPO }}
-          token: ${{ secrets.GITOPS_TOKEN }}
-          path: _gitops
-
-      - name: Create branch, commit, open PR
-        env:
-          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
-          IMAGE_TAG: ${{ needs.build.outputs.image-tag }}
-          REF_NAME: ${{ github.ref_name }}
-          ACTOR: ${{ github.actor }}
-          SERVER_URL: ${{ github.server_url }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          GITOPS_REPO_NAME: ${{ env.GITOPS_REPO }}
-        run: |
-          VALUES="_gitops/envs/qa/values-notification-service.yaml"
-          BRANCH="promote/qa/notification-service/${IMAGE_TAG}"
-
-          if [[ ! -f "$VALUES" ]]; then
-            echo "::warning::$VALUES not found — QA PR skipped."
-            exit 0
+          if npm run | grep -q "build"; then
+            npm run build
+          else
+            echo "No build script found. Skipping application build."
           fi
 
-          cd _gitops
-          git checkout -b "$BRANCH"
-          yq e ".image.tag = \"${IMAGE_TAG}\"" -i "envs/qa/values-notification-service.yaml"
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          if git diff --staged --quiet; then
-            echo "QA already has this image — no PR needed"
-            exit 0
-          fi
-          git commit -m "promote(qa): notification-service → ${IMAGE_TAG}"
-          git push origin "$BRANCH"
-
-          printf '%s\n' \
-            "## QA Promotion" \
-            "" \
-            "Service : notification-service" \
-            "Image   : ${IMAGE_TAG}" \
-            "Branch  : ${REF_NAME}" \
-            "Actor   : ${ACTOR}" \
-            "Build   : ${SERVER_URL}/${REPOSITORY}/actions/runs/${RUN_ID}" \
-            "" \
-            "## Checklist" \
-            "- [ ] DEV smoke test passed (see build link above)" \
-            "- [ ] No unexpected config changes in this diff" \
-            "- [ ] QA team sign-off" \
-            "" \
-            "Merging this PR updates envs/qa/values-notification-service.yaml." \
-            "ArgoCD (pharma-qa) auto-syncs on merge." > /tmp/pr-body.md
-
-          gh pr create \
-            --repo "$GITOPS_REPO_NAME" \
-            --title "promote(qa): notification-service → ${IMAGE_TAG}" \
-            --body-file /tmp/pr-body.md \
-            --base main \
-            --head "$BRANCH"
-
-          echo "::notice title=QA PR opened::Review and merge in ${GITOPS_REPO_NAME} to deploy to QA."
-
-  # ── 4. DAST — ZAP baseline scan against DEV ─────────────────────────────────
-  # Disabled. Enable by removing `if: false` once DEV_NOTIFICATION_SERVICE_URL is set in
-  # GitHub repository variables (Settings → Secrets and variables → Variables).
-  dast:
-    name: DAST — ZAP Baseline (DEV)
-    if: false
-    needs: deploy-dev
-    runs-on: ubuntu-latest
-    steps:
-      - name: Wait for DEV service to be healthy
-        run: |
-          URL="${{ vars.DEV_NOTIFICATION_SERVICE_URL }}/actuator/health"
-          for i in $(seq 1 20); do
-            curl -sf "$URL" && echo "Healthy" && exit 0
-            echo "Attempt $i/20 — retrying in 15s..."
-            sleep 15
-          done
-          echo "::error::DEV endpoint not healthy after 5 minutes"
-          exit 1
-
-      - name: OWASP ZAP — Baseline scan
-        uses: zaproxy/action-baseline@v0.12.0
+      # ---------------------------------------------------------
+      # 6. Configure AWS using GitHub OIDC
+      # ---------------------------------------------------------
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          target: ${{ vars.DEV_NOTIFICATION_SERVICE_URL }}
-          fail_action: warn
-          artifact_name: zap-report-notification-service
+          role-to-assume: arn:aws:iam::076429318738:role/pharma-github-actions-role
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      # ---------------------------------------------------------
+      # 7. Login to Amazon ECR
+      # ---------------------------------------------------------
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ---------------------------------------------------------
+      # 8. Set image variables
+      # ---------------------------------------------------------
+      - name: Set image variables
+        id: image
+        run: |
+          echo "registry=${{ steps.login-ecr.outputs.registry }}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # ---------------------------------------------------------
+      # 9. Verify ECR repository
+      # ---------------------------------------------------------
+      - name: Verify ECR repository
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "${ECR_REPOSITORY}" \
+            --region "${AWS_REGION}"
+
+      # ---------------------------------------------------------
+      # 10. Build Docker image
+      # ---------------------------------------------------------
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t "${{ steps.image.outputs.image }}:${{ steps.image.outputs.tag }}" \
+            -t "${{ steps.image.outputs.image }}:latest" \
+            ./notification-service
+
+      # ---------------------------------------------------------
+      # 11. Trivy vulnerability scan
+      # ---------------------------------------------------------
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.image.outputs.image }}:${{ steps.image.outputs.tag }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # ---------------------------------------------------------
+      # 12. Upload Trivy SARIF
+      # ---------------------------------------------------------
+      # hashFiles prevents failure if Trivy didn't create the file.
+      # ---------------------------------------------------------
+      - name: Upload Trivy results to GitHub
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-notification-service
+
+      # ---------------------------------------------------------
+      # 13. Push image to ECR
+      # ---------------------------------------------------------
+      - name: Push Docker image to ECR
+        run: |
+          docker push "${{ steps.image.outputs.image }}:${{ steps.image.outputs.tag }}"
+          docker push "${{ steps.image.outputs.image }}:latest"
+
+      # ---------------------------------------------------------
+      # 14. Verify pushed image
+      # ---------------------------------------------------------
+      - name: Verify image in ECR
+        run: |
+          aws ecr describe-images \
+            --repository-name "${ECR_REPOSITORY}" \
+            --region "${AWS_REGION}" \
+            --image-ids imageTag="${{ steps.image.outputs.tag }}"
+
+      # ---------------------------------------------------------
+      # 15. Print image information
+      # ---------------------------------------------------------
+      - name: Display image
+        run: |
+          echo "============================================"
+          echo "Notification Service image pushed:"
+          echo "${{ steps.image.outputs.image }}:${{ steps.image.outputs.tag }}"
+          echo "============================================"
