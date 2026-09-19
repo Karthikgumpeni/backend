@@ -1,4 +1,4 @@
-#Do#ker File
+#Doker File
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
