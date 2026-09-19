@@ -162,7 +162,8 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
-          category: trivy-${{ inputs.service-name }}
+          category: trivy-${{ inputs.service-name }}   
+
 
       # ── Push image to ECR ─────────────────────────────────────────────────────
       - name: Push image to ECR
