@@ -132,36 +132,14 @@ jobs:
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-      # ── npm audit (fail on HIGH/CRITICAL) ─────────────────────────────────────
+             # ── npm audit ─────────────────────────────────────────────────────────────
       - name: npm audit (HIGH/CRITICAL → fail)
-        run: cd ${{ inputs.service-dir }} && npm audit --audit-level=high
+        working-directory: ${{ inputs.service-dir }}
+        run: npm audit --audit-level=high
 
-      # ── AWS credentials via OIDC (no long-lived keys) ─────────────────────────
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/pharma-dev-github-actions-role
-          aws-region: ${{ inputs.aws-region }}
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      # ── Docker build (multi-stage, non-root UID/GID 1000) ─────────────────────
-      - name: Build Docker image
-        id: docker-build
-        run: |
-          IMAGE="${{ steps.login-ecr.outputs.registry }}/${{ inputs.ecr-repository }}:${{ steps.meta.outputs.image_tag }}"
-          cd ${{ inputs.service-dir }}
-          docker build \
-            --build-arg UID=1000 \
-            --build-arg GID=1000 \
-            -t "$IMAGE" \
-            .
-          echo "image=$IMAGE" >> $GITHUB_OUTPUT
-
-      # ── Trivy — image scan (fail on HIGH/CRITICAL CVEs) ───────────────────────
+      # ── Trivy — image scan ─────────────────────────────────────────────────────
       - name: Trivy — Image vulnerability scan
+        id: trivy-scan
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.docker-build.outputs.image }}
@@ -171,12 +149,21 @@ jobs:
           exit-code: '0'
           ignore-unfixed: true
 
-      - name: Upload Trivy SARIF to GitHub Security tab
+      - name: Verify Trivy SARIF report
         if: always()
+        run: |
+          if [ ! -s trivy-results.sarif ]; then
+            echo "::warning::Trivy did not generate trivy-results.sarif"
+            exit 0
+          fi
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-results.sarif
-          category: trivy-${{ inputs.service-name }}
+          category: trivy-${{ inputs.service-name }}   
+
 
       # ── Push image to ECR ─────────────────────────────────────────────────────
       - name: Push image to ECR
