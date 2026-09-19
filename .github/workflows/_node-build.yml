@@ -132,7 +132,7 @@ jobs:
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
 
-             # ── npm audit ─────────────────────────────────────────────────────────────
+            # ── npm audit ─────────────────────────────────────────────────────────────
       - name: npm audit (HIGH/CRITICAL → fail)
         working-directory: ${{ inputs.service-dir }}
         run: npm audit --audit-level=high
